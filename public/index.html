@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JIRA Ticket Creator</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>JIRA Ticket Creator</h1>
+            <p>Create bug reports and issues quickly and efficiently</p>
+        </div>
+
+        <div class="config-section" id="loginSection">
+            <h2>Authentication Status</h2>
+            <div class="auth-status">
+                <div class="auth-indicator" id="authIndicator"></div>
+                <span id="authStatus">Not authenticated</span>
+            </div>
+            <button id="jiraLoginBtn" class="btn btn-primary">Sign in with Atlassian</button>
+            <button id="debugBtn" class="btn btn-secondary" style="margin-left: 10px;">Debug Info</button>
+
+            <div class="form-group" style="margin-top: 20px;">
+                <label for="jiraUrl">JIRA Base URL</label>
+                <input type="url" id="jiraUrl" value="https://tmsph.atlassian.net" required disabled>
+                <small style="color: #666; font-size: 12px;">This is your JIRA instance URL (e.g.,
+                    https://yourcompany.atlassian.net)</small>
+            </div>
+        </div>
+
+        <!-- Ticket Creation Form -->
+        <div class="form-section ticket-form">
+            <h2>Create New Ticket</h2>
+
+            <div id="statusMessage"></div>
+
+            <form id="ticketForm">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="projectSelect">Project</label>
+                        <select id="projectSelect" required disabled>
+                            <option value="">Select a project...</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="issueTypeSelect">Issue Type</label>
+                        <select id="issueTypeSelect" required disabled>
+                            <option value="">Select issue type...</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="assigneeSelect">Assignee</label>
+                        <select id="assigneeSelect" disabled>
+                            <option value="">Unassigned</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="prioritySelect">Priority</label>
+                        <select id="prioritySelect">
+                            <option value="3">Medium</option>
+                            <option value="1">Highest</option>
+                            <option value="2">High</option>
+                            <option value="4">Low</option>
+                            <option value="5">Lowest</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="summary">Summary *</label>
+                    <input type="text" id="summary" placeholder="Brief description of the issue" required
+                        maxlength="255">
+                    <small style="color: #666; font-size: 12px;">Maximum 255 characters</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="description">Description</label>
+                    <textarea id="description"
+                        placeholder="Detailed description of the issue:&#10;&#10;Steps to reproduce:&#10;1. Go to...&#10;2. Click on...&#10;3. See error&#10;&#10;Expected behavior:&#10;&#10;Actual behavior:&#10;&#10;Additional information:"></textarea>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="labels">Labels (comma-separated)</label>
+                        <input type="text" id="labels" placeholder="bug, frontend, urgent">
+                    </div>
+                </div>
+
+                <!-- File Upload Section -->
+                <div class="form-group">
+                    <label>Attachments</label>
+                    <div class="file-upload-area" id="fileUploadArea">
+                        <input type="file" id="fileInput" multiple accept="*/*">
+                        <div class="file-upload-icon">📁</div>
+                        <div class="file-upload-text">Click to browse or drag and drop files here</div>
+                        <div class="file-upload-subtext">Maximum file size: 10MB per file</div>
+                    </div>
+                    <div class="file-list" id="fileList"></div>
+                </div>
+
+                <div style="text-align: center; margin-top: 30px;">
+                    <button type="submit" class="btn btn-primary" id="createTicketBtn">
+                        <span id="createLoadingIcon" class="hidden loading"></span>
+                        Create Ticket
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        let jiraData = {
+            projects: [],
+            issueTypes: [],
+            users: [],
+            createMeta: null
+        };
+
+        let selectedFiles = [];
+        const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+        // Authentication and CloudId management
+        function getCloudIdFromUrl() {
+            const params = new URLSearchParams(window.location.search);
+            return params.get('cloudId');
+        }
+
+        function getCurrentCloudId() {
+            return localStorage.getItem('cloudId');
+        }
+
+        function setAuthenticationStatus(isAuthenticated, cloudId = null) {
+            const indicator = document.getElementById('authIndicator');
+            const status = document.getElementById('authStatus');
+            const loginBtn = document.getElementById('jiraLoginBtn');
+
+            if (isAuthenticated && cloudId) {
+                indicator.classList.add('authenticated');
+                status.textContent = `Authenticated (Cloud ID: ${cloudId.substring(0, 8)}...)`;
+                loginBtn.textContent = 'Re-authenticate';
+            } else {
+                indicator.classList.remove('authenticated');
+                status.textContent = 'Not authenticated';
+                loginBtn.textContent = 'Sign in with Atlassian';
+            }
+        }
+
+        function showStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('statusMessage');
+            statusDiv.className = `status ${type}`;
+            statusDiv.innerHTML = message;
+            statusDiv.classList.remove('hidden');
+
+            if (type === 'success') {
+                setTimeout(() => {
+                    statusDiv.classList.add('hidden');
+                }, 60000);
+            }
+        }
+
+        function setLoading(isLoading, buttonId, iconId) {
+            const button = document.getElementById(buttonId);
+            const icon = document.getElementById(iconId);
+
+            if (isLoading) {
+                button.disabled = true;
+                icon.classList.remove('hidden');
+            } else {
+                button.disabled = false;
+                icon.classList.add('hidden');
+            }
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function getFileIcon(filename) {
+            const extension = filename.split('.').pop().toLowerCase();
+            const iconMap = {
+                'pdf': '📄', 'doc': '📝', 'docx': '📝', 'xls': '📊', 'xlsx': '📊',
+                'ppt': '📽️', 'pptx': '📽️', 'txt': '📄',
+                'jpg': '🖼️', 'jpeg': '🖼️', 'png': '🖼️', 'gif': '🖼️', 'bmp': '🖼️',
+                'mp4': '🎥', 'avi': '🎥', 'mov': '🎥', 'mp3': '🎵', 'wav': '🎵',
+                'zip': '📦', 'rar': '📦', '7z': '📦', 'default': '📎'
+            };
+            return iconMap[extension] || iconMap.default;
+        }
+
+        function addFileToList(file) {
+            if (file.size > MAX_FILE_SIZE) {
+                showStatus(`File "${file.name}" is too large. Maximum size is ${formatFileSize(MAX_FILE_SIZE)}.`, 'error');
+                return false;
+            }
+
+            if (selectedFiles.some(f => f.name === file.name && f.size === file.size)) {
+                showStatus(`File "${file.name}" is already selected.`, 'error');
+                return false;
+            }
+
+            selectedFiles.push(file);
+            renderFileList();
+            return true;
+        }
+
+        function removeFile(index) {
+            selectedFiles.splice(index, 1);
+            renderFileList();
+        }
+
+        function renderFileList() {
+            const fileList = document.getElementById('fileList');
+
+            if (selectedFiles.length === 0) {
+                fileList.innerHTML = '';
+                return;
+            }
+
+            fileList.innerHTML = selectedFiles.map((file, index) => `
+                <div class="file-item">
+                    <div class="file-info">
+                        <div class="file-icon">${getFileIcon(file.name)}</div>
+                        <div class="file-details">
+                            <div class="file-name">${file.name}</div>
+                            <div class="file-size">${formatFileSize(file.size)}</div>
+                        </div>
+                    </div>
+                    <button type="button" class="file-remove" onclick="removeFile(${index})">Remove</button>
+                </div>
+            `).join('');
+        }
+
+        async function makeJiraRequest(endpoint, options = {}) {
+            const cloudId = getCurrentCloudId();
+
+            if (!cloudId) {
+                throw new Error('No authentication found. Please sign in with JIRA.');
+            }
+
+            const baseUrl = 'http://localhost:3001/api/jira';
+            const url = `${baseUrl}${endpoint}`;
+
+            console.log(`Making JIRA request: ${options.method || 'GET'} ${endpoint}`);
+
+            const headers = {
+                'X-Cloud-Id': cloudId,
+                ...(options.headers || {})
+            };
+
+            // Only set Content-Type for methods that have a body
+            if (options.method && ['POST', 'PUT', 'PATCH'].includes(options.method.toUpperCase()) && options.body && typeof options.body === 'string') {
+                headers['Content-Type'] = 'application/json';
+            }
+
+            const response = await fetch(url, {
+                method: options.method || 'GET',
+                headers: headers,
+                body: options.body || null
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+                throw new Error(`API Error (${response.status}): ${errorData.error || 'Unknown error'}`);
+            }
+
+            return response.json();
+        }
+
+        async function uploadAttachments(issueKey) {
+            const baseUrl = 'http://localhost:3001/api/jira';
+            if (selectedFiles.length === 0) {
+                return { success: true, message: 'No attachments to upload' };
+            }
+
+            try {
+                console.log(`Uploading ${selectedFiles.length} file(s) to issue ${issueKey}`);
+
+                const formData = new FormData();
+                selectedFiles.forEach(file => {
+                    console.log(`Adding file to FormData: ${file.name} (${formatFileSize(file.size)})`);
+                    formData.append('file', file);
+                });
+
+                const cloudId = getCurrentCloudId();
+                const response = await fetch(`${baseUrl}/issue/${issueKey}/attachments?cloudId=${cloudId}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+                    throw new Error(errorData.error || 'Upload failed');
+                }
+
+                const result = await response.json();
+                console.log('Attachment upload response:', result);
+                return result;
+            } catch (error) {
+                console.error('Error uploading attachments:', error);
+                throw new Error(`Failed to upload attachments: ${error.message}`);
+            }
+        }
+
+        async function loadJiraData() {
+            try {
+                showStatus('Loading JIRA projects...', 'info');
+
+                // Load projects using the search endpoint
+                const projectsResponse = await makeJiraRequest('/project/search');
+                console.log('Received from /project/search:', projectsResponse);
+                jiraData.projects = projectsResponse.values || [];
+
+                if (jiraData.projects.length === 0) {
+                    throw new Error('No projects found. Please check your permissions.');
+                }
+
+                populateProjectDropdown();
+                showStatus(`Loaded ${jiraData.projects.length} projects. Select a project to load issue types and assignees.`, 'success');
+
+            } catch (error) {
+                showStatus(`Error loading JIRA data: ${error.message}`, 'error');
+                console.error('Error:', error);
+            }
+        }
+
+        async function loadProjectData(projectKey) {
+            if (!projectKey) return;
+
+            try {
+                showStatus('Loading project details...', 'info');
+
+                // Get project details to find the project ID
+                const project = jiraData.projects.find(p => p.key === projectKey);
+                if (!project) {
+                    throw new Error('Project not found');
+                }
+
+                // Load issue types for this project
+                const issueTypesResponse = await makeJiraRequest(`/issuetype/project?projectId=${project.id}`);
+                jiraData.issueTypes = issueTypesResponse || [];
+
+                // Load assignable users for this project
+                try {
+                    const usersResponse = await makeJiraRequest(`/user/assignable/multiProjectSearch?projectKeys=${projectKey}`);
+                    jiraData.users = usersResponse || [];
+                } catch (e) {
+                    console.warn('Could not load assignable users:', e);
+                    jiraData.users = [];
+                }
+
+                // Load create metadata to understand required fields
+                try {
+                    const createMetaResponse = await makeJiraRequest(`/issue/createmeta?projectKeys=${projectKey}&expand=projects.issuetypes.fields`);
+                    jiraData.createMeta = createMetaResponse;
+                } catch (e) {
+                    console.warn('Could not load create metadata:', e);
+                    jiraData.createMeta = null;
+                }
+
+                populateProjectSpecificDropdowns();
+                showStatus('Project data loaded successfully!', 'success');
+
+            } catch (error) {
+                showStatus(`Error loading project data: ${error.message}`, 'error');
+                console.error('Error:', error);
+            }
+        }
+
+        function populateProjectDropdown() {
+            const projectSelect = document.getElementById('projectSelect');
+            projectSelect.innerHTML = '<option value="">Select a project...</option>';
+            jiraData.projects.forEach(project => {
+                const option = document.createElement('option');
+                option.value = project.key;
+                option.textContent = `${project.name} (${project.key})`;
+                projectSelect.appendChild(option);
+            });
+            projectSelect.disabled = false;
+        }
+
+        function populateProjectSpecificDropdowns() {
+            // Populate issue types
+            const issueTypeSelect = document.getElementById('issueTypeSelect');
+            issueTypeSelect.innerHTML = '<option value="">Select issue type...</option>';
+            jiraData.issueTypes.forEach(issueType => {
+                const option = document.createElement('option');
+                option.value = issueType.id;
+                option.textContent = issueType.name;
+                issueTypeSelect.appendChild(option);
+            });
+            issueTypeSelect.disabled = false;
+
+            // Populate assignees
+            const assigneeSelect = document.getElementById('assigneeSelect');
+            assigneeSelect.innerHTML = '<option value="">Unassigned</option>';
+            jiraData.users.forEach(user => {
+                const option = document.createElement('option');
+                option.value = user.accountId;
+                option.textContent = `${user.displayName} (${user.emailAddress || user.name || 'No email'})`;
+                assigneeSelect.appendChild(option);
+            });
+            assigneeSelect.disabled = false;
+        }
+
+        // Convert plain text to Atlassian Document Format (ADF)
+        function convertToADF(text) {
+            if (!text || text.trim() === '') {
+                return {
+                    version: 1,
+                    type: "doc",
+                    content: [
+                        {
+                            type: "paragraph",
+                            content: [
+                                {
+                                    type: "text",
+                                    text: "No description provided"
+                                }
+                            ]
+                        }
+                    ]
+                };
+            }
+
+            // Split text into paragraphs and convert to ADF format
+            const paragraphs = text.split('\n\n').filter(p => p.trim());
+            const content = paragraphs.map(paragraph => {
+                const lines = paragraph.split('\n').filter(line => line.trim());
+
+                if (lines.length === 1) {
+                    // Single line paragraph
+                    return {
+                        type: "paragraph",
+                        content: [
+                            {
+                                type: "text",
+                                text: lines[0].trim()
+                            }
+                        ]
+                    };
+                } else {
+                    // Multi-line paragraph - join with line breaks
+                    return {
+                        type: "paragraph",
+                        content: [
+                            {
+                                type: "text",
+                                text: lines.join('\n')
+                            }
+                        ]
+                    };
+                }
+            });
+
+            return {
+                version: 1,
+                type: "doc",
+                content: content.length > 0 ? content : [
+                    {
+                        type: "paragraph",
+                        content: [
+                            {
+                                type: "text",
+                                text: "No description provided"
+                            }
+                        ]
+                    }
+                ]
+            };
+        }
+
+        async function createTicket(ticketData) {
+            try {
+                console.log('Creating ticket with data:', JSON.stringify(ticketData, null, 2));
+
+                const response = await makeJiraRequest('/issue', {
+                    method: 'POST',
+                    body: JSON.stringify(ticketData)
+                });
+
+                console.log('Ticket created successfully:', response);
+                return response;
+            } catch (error) {
+                console.error('Error creating ticket:', error);
+                throw error;
+            }
+        }
+
+        function buildTicketPayload() {
+            const projectKey = document.getElementById('projectSelect').value;
+            const issueTypeId = document.getElementById('issueTypeSelect').value;
+            const assigneeId = document.getElementById('assigneeSelect').value;
+            const priority = document.getElementById('prioritySelect').value;
+            const summary = document.getElementById('summary').value.trim();
+            const description = document.getElementById('description').value.trim();
+            const labels = document.getElementById('labels').value.trim();
+
+            // Validate required fields
+            if (!projectKey) throw new Error('Please select a project');
+            if (!issueTypeId) throw new Error('Please select an issue type');
+            if (!summary) throw new Error('Please enter a summary');
+
+            // Build the JIRA issue payload
+            const payload = {
+                fields: {
+                    project: {
+                        key: projectKey
+                    },
+                    issuetype: {
+                        id: issueTypeId
+                    },
+                    summary: summary
+                }
+            };
+
+            // Add description in ADF format
+            payload.fields.description = convertToADF(description);
+
+            // Add priority only if createMeta exists and priority field is available
+            try {
+                const issueTypeMeta = jiraData.createMeta?.projects?.[0]?.issuetypes?.find(type => type.id === issueTypeId);
+                if (issueTypeMeta?.fields?.priority && priority) {
+                    payload.fields.priority = {
+                        id: priority
+                    };
+                }
+            } catch (e) {
+                console.warn('Skipping priority field due to missing metadata:', e);
+            }
+
+            // Add assignee if selected
+            if (assigneeId) {
+                payload.fields.assignee = {
+                    accountId: assigneeId
+                };
+            }
+
+            // Add labels if provided
+            if (labels) {
+                const labelArray = labels.split(',').map(label => label.trim()).filter(label => label.length > 0);
+                if (labelArray.length > 0) {
+                    payload.fields.labels = labelArray;
+                }
+            }
+
+            return payload;
+        }
+
+        function resetForm() {
+            // Reset form fields but keep JIRA configuration
+            document.getElementById('ticketForm').reset();
+            document.getElementById('prioritySelect').value = '3'; // Reset to Medium
+
+            // Reset dropdowns to default state
+            const projectSelect = document.getElementById('projectSelect');
+            projectSelect.value = '';
+
+            // Disable dependent dropdowns
+            document.getElementById('issueTypeSelect').innerHTML = '<option value="">Select issue type...</option>';
+            document.getElementById('issueTypeSelect').disabled = true;
+            document.getElementById('assigneeSelect').innerHTML = '<option value="">Unassigned</option>';
+            document.getElementById('assigneeSelect').disabled = true;
+        }
+
+        // Event listeners
+        document.getElementById('jiraLoginBtn').addEventListener('click', () => {
+            window.location.href = 'http://localhost:3001/auth/login'; // Adjust if your proxy is hosted elsewhere
+        });
+
+        document.getElementById('projectSelect').addEventListener('change', (e) => {
+            const projectKey = e.target.value;
+            if (projectKey) {
+                loadProjectData(projectKey);
+            } else {
+                // Reset dependent dropdowns
+                document.getElementById('issueTypeSelect').innerHTML = '<option value="">Select issue type...</option>';
+                document.getElementById('issueTypeSelect').disabled = true;
+                document.getElementById('assigneeSelect').innerHTML = '<option value="">Unassigned</option>';
+                document.getElementById('assigneeSelect').disabled = true;
+            }
+        });
+
+        document.getElementById('ticketForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // Clear previous status (success/error) before creating a new one
+            document.getElementById('statusMessage').classList.add('hidden');
+
+            setLoading(true, 'createTicketBtn', 'createLoadingIcon');
+
+            let ticketUrl = ''; // Declare here so it's accessible in catch/finally
+
+            try {
+                showStatus('Creating ticket...', 'info');
+
+                // Build the ticket payload
+                const ticketPayload = buildTicketPayload();
+
+                // Create the ticket
+                const result = await createTicket(ticketPayload);
+
+                // Build ticket URL
+                const jiraUrl = document.getElementById('jiraUrl').value;
+                ticketUrl = `${jiraUrl}/browse/${result.key}`;
+
+                // Upload attachments if any
+                if (selectedFiles.length > 0) {
+                    showStatus('Ticket created! Uploading attachments...', 'info');
+                    await uploadAttachments(result.key);
+                }
+
+                // Clear attachments after success
+                selectedFiles = [];
+                renderFileList();
+
+                // Show success message
+                showStatus(
+                    `Ticket <strong>${result.key}</strong> was successfully created!<br><br>` +
+                    `<a href="${ticketUrl}" target="_blank" style="color: #007bff; text-decoration: underline;">View Ticket in JIRA</a>`,
+                    'success'
+                );
+
+                resetForm();
+
+            } catch (error) {
+                console.error('Ticket creation failed:', error);
+
+                let errorMessage = `Error creating ticket: ${error.message}`;
+
+                if (ticketUrl) {
+                    errorMessage += `\n\nPartial success: You can check the ticket here: ${ticketUrl}`;
+                }
+
+                // Handle specific JIRA API errors
+                if (error.message.includes('400')) {
+                    errorMessage += '\n\nThis is usually due to missing required fields or invalid data. Please check your project configuration and required fields.';
+                } else if (error.message.includes('401')) {
+                    errorMessage += '\n\nAuthentication failed. Please check your JIRA credentials.';
+                } else if (error.message.includes('403')) {
+                    errorMessage += '\n\nPermission denied. You may not have permission to create issues in this project.';
+                } else if (error.message.includes('404')) {
+                    errorMessage += '\n\nResource not found. Please check your JIRA URL and project configuration.';
+                }
+
+                showStatus(errorMessage, 'error');
+
+            } finally {
+                setLoading(false, 'createTicketBtn', 'createLoadingIcon');
+            }
+        });
+
+        // File upload event listeners
+        const fileUploadArea = document.getElementById('fileUploadArea');
+        const fileInput = document.getElementById('fileInput');
+
+        // Handle file input change
+        fileInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            files.forEach(file => addFileToList(file));
+            // Clear the input to allow selecting the same file again
+            e.target.value = '';
+        });
+
+        // Handle drag and drop
+        fileUploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            fileUploadArea.classList.add('dragover');
+        });
+
+        fileUploadArea.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            fileUploadArea.classList.remove('dragover');
+        });
+
+        fileUploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            fileUploadArea.classList.remove('dragover');
+
+            const files = Array.from(e.dataTransfer.files);
+            files.forEach(file => addFileToList(file));
+        });
+
+        // Debug button functionality
+        document.getElementById('debugBtn').addEventListener('click', () => {
+            const cloudId = getCurrentCloudId();
+            const debugInfo = {
+                cloudId: cloudId,
+                authStatus: cloudId ? 'Authenticated' : 'Not authenticated',
+                projects: jiraData.projects.length,
+                issueTypes: jiraData.issueTypes.length,
+                users: jiraData.users.length,
+                selectedFiles: selectedFiles.length,
+                jiraUrl: document.getElementById('jiraUrl').value
+            };
+
+            console.log('Debug Info:', debugInfo);
+            alert('Debug info logged to console:\n' + JSON.stringify(debugInfo, null, 2));
+        });
+
+        // Auto-save JIRA configuration to localStorage for convenience
+        function saveJiraConfig() {
+            const config = {
+                jiraUrl: document.getElementById('jiraUrl').value,
+            };
+            localStorage.setItem('jiraConfig', JSON.stringify(config));
+        }
+
+        function loadJiraConfig() {
+            try {
+                const config = localStorage.getItem('jiraConfig');
+                if (config) {
+                    const parsed = JSON.parse(config);
+                    document.getElementById('jiraUrl').value = parsed.jiraUrl || '';
+                }
+            } catch (e) {
+                console.warn('Could not load saved JIRA configuration:', e);
+            }
+        }
+
+        // Save configuration when fields change
+        document.getElementById('jiraUrl').addEventListener('change', saveJiraConfig);
+
+        // Character counter for summary field
+        document.getElementById('summary').addEventListener('input', (e) => {
+            const maxLength = 255;
+            const currentLength = e.target.value.length;
+            const small = e.target.nextElementSibling;
+            small.textContent = `${currentLength}/${maxLength} characters`;
+
+            if (currentLength > maxLength * 0.9) {
+                small.style.color = '#dc3545';
+            } else {
+                small.style.color = '#666';
+            }
+        });
+
+        // Initialize the application
+        document.addEventListener('DOMContentLoaded', () => {
+            // Load saved JIRA configuration
+            loadJiraConfig();
+
+            // Check for cloudId from URL (OAuth callback)
+            const cloudId = getCloudIdFromUrl();
+            if (cloudId) {
+                localStorage.setItem('cloudId', cloudId);
+                // Clean up URL
+                window.history.replaceState({}, document.title, window.location.pathname);
+            }
+
+            // Set authentication status and load data if authenticated
+            const storedCloudId = getCurrentCloudId();
+            setAuthenticationStatus(!!storedCloudId, storedCloudId);
+
+            if (storedCloudId) {
+                loadJiraData(); // Trigger project loading
+            }
+        });
+
+        // Global function to remove files (called from rendered HTML)
+        window.removeFile = removeFile;
+
+    </script>
+</body>
+
+</html>
